@@ -1,0 +1,12 @@
+include(FetchContent)
+
+FetchContent_Declare(mINI
+    GIT_REPOSITORY https://github.com/metayeti/mINI.git
+    GIT_TAG        0.9.18
+    GIT_SHALLOW    TRUE
+    GIT_PROGRESS   TRUE
+)
+FetchContent_MakeAvailable(mINI)
+
+get_target_property(_mini_includes mINI INTERFACE_INCLUDE_DIRECTORIES)
+set_target_properties(mINI PROPERTIES INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_mini_includes}")

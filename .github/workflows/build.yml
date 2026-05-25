@@ -1,0 +1,182 @@
+name: Build
+
+permissions:
+  contents: read
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  LLVM_VERSION: '21'
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          sudo apt-get remove -y clang-format clang-tidy || true
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_VERSION all
+          sudo apt-get install -y ninja-build python3 msitools python3-simplejson python3-six
+          for tool in clang-cl lld-link llvm-lib llvm-rc llvm-mt clang-format clang-tidy; do
+            sudo update-alternatives --install /usr/bin/$tool $tool /usr/bin/$tool-$LLVM_VERSION 1000
+          done
+
+      - name: clang-format check
+        run: |
+          find src include -type f \( -name '*.cpp' -o -name '*.hpp' \) \
+            | xargs clang-format --dry-run --Werror
+
+      - name: Clone msvc-wine
+        run: git clone https://github.com/mstorsjo/msvc-wine.git /tmp/msvc-wine
+
+      - name: Get MSVC version
+        id: msvc-version
+        run: |
+          MSVC_VER=$(/tmp/msvc-wine/vsdownload.py --print-version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' | tail -1)
+          echo "version=$MSVC_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Restore msvc-wine cache
+        id: msvc-wine-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.msvc
+          key: msvc-wine-${{ steps.msvc-version.outputs.version }}-${{ hashFiles('cmake/toolchains/*.cmake') }}
+          restore-keys: msvc-wine-
+
+      - name: Install msvc-wine
+        if: steps.msvc-wine-cache.outputs.cache-hit != 'true'
+        run: |
+          /tmp/msvc-wine/vsdownload.py --accept-license --dest ~/.msvc
+          /tmp/msvc-wine/install.sh ~/.msvc
+
+      - name: Restore CMake deps cache
+        uses: actions/cache@v5
+        with:
+          path: build/_deps
+          key: cmake-deps-Linux-${{ hashFiles('cmake/deps/*.cmake') }}
+          restore-keys: cmake-deps-Linux-
+
+      - name: Configure CMake
+        run: cmake --preset linux-x64-release
+
+      - name: clang-tidy check
+        run: |
+          find src -type f -name '*.cpp' \
+            | xargs clang-tidy -p build
+
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-2025-vs2026 
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore CMake deps cache
+        uses: actions/cache@v5
+        with:
+          path: build/_deps
+          key: cmake-deps-Windows-${{ hashFiles('cmake/deps/*.cmake') }}
+          restore-keys: cmake-deps-Windows-
+
+      - name: Configure Release
+        run: cmake --preset windows-x64-release
+
+      - name: Build Release
+        run: cmake --build --preset windows-x64-release --config Release
+
+      - name: Configure Debug
+        run: cmake --preset windows-x64-debug
+
+      - name: Build Debug
+        run: cmake --build --preset windows-x64-debug --config Debug
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AC.Rogue.PatchFix-windows-${{ github.sha }}
+          path: |
+            build/Release/AC.Rogue.PatchFix.asi
+            config/AC.Rogue.PatchFix.ini
+          if-no-files-found: error
+
+  build-linux:
+    name: Build (Linux cross-compile)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          sudo apt-get remove -y clang-format clang-tidy || true
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_VERSION all
+          sudo apt-get install -y ninja-build python3 msitools python3-simplejson python3-six
+          for tool in clang-cl lld-link llvm-lib llvm-rc llvm-mt; do
+            sudo update-alternatives --install /usr/bin/$tool $tool /usr/bin/$tool-$LLVM_VERSION 1000
+          done
+
+      - name: Clone msvc-wine
+        run: git clone https://github.com/mstorsjo/msvc-wine.git /tmp/msvc-wine
+
+      - name: Get MSVC version
+        id: msvc-version
+        run: |
+          MSVC_VER=$(/tmp/msvc-wine/vsdownload.py --print-version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' | tail -1)
+          echo "version=$MSVC_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Restore msvc-wine cache
+        id: msvc-wine-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.msvc
+          key: msvc-wine-${{ steps.msvc-version.outputs.version }}-${{ hashFiles('cmake/toolchains/*.cmake') }}
+          restore-keys: msvc-wine-
+
+      - name: Install msvc-wine
+        if: steps.msvc-wine-cache.outputs.cache-hit != 'true'
+        run: |
+          /tmp/msvc-wine/vsdownload.py --accept-license --dest ~/.msvc
+          /tmp/msvc-wine/install.sh ~/.msvc
+
+      - name: Restore CMake deps cache
+        uses: actions/cache@v5
+        with:
+          path: build/_deps
+          key: cmake-deps-Linux-${{ hashFiles('cmake/deps/*.cmake') }}
+          restore-keys: cmake-deps-Linux-
+
+      - name: Configure Release
+        run: cmake --preset linux-x64-release
+
+      - name: Build Release
+        run: cmake --build --preset linux-x64-release
+
+      - name: Save Release artifact
+        run: cp build/AC.Rogue.PatchFix.asi /tmp/AC.Rogue.PatchFix.asi
+
+      - name: Configure Debug
+        run: |
+          rm -rf build
+          cmake --preset linux-x64-debug
+
+      - name: Build Debug
+        run: cmake --build --preset linux-x64-debug
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AC.Rogue.PatchFix-linux-${{ github.sha }}
+          path: |
+            /tmp/AC.Rogue.PatchFix.asi
+            config/AC.Rogue.PatchFix.ini
+          if-no-files-found: error

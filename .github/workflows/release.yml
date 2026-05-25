@@ -1,0 +1,162 @@
+name: Release
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Semantic version (e.g. 1.2.0)"
+        required: true
+        type: string
+      prerelease:
+        description: "Mark as prerelease"
+        required: false
+        default: false
+        type: boolean
+
+env:
+  LLVM_VERSION: '21'
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    name: Validate inputs
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check version format
+        run: |
+          if ! echo "${{ inputs.version }}" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+(-[a-zA-Z0-9.]+)?$'; then
+            echo "::error::Invalid version format '${{ inputs.version }}'. Expected: X.Y.Z or X.Y.Z-suffix"
+            exit 1
+          fi
+
+  build-windows:
+    name: Build (Windows)
+    runs-on: windows-2025-vs2026 
+    needs: [validate]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Restore CMake deps cache
+        uses: actions/cache@v5
+        with:
+          path: build/_deps
+          key: cmake-deps-Windows-${{ hashFiles('cmake/deps/*.cmake') }}
+          restore-keys: cmake-deps-Windows-
+
+      - name: Configure Release
+        run: cmake --preset windows-x64-release
+
+      - name: Build Release
+        run: cmake --build --preset windows-x64-release --config Release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-asi
+          path: build/Release/AC.Rogue.PatchFix.asi
+          if-no-files-found: error
+
+  build-linux:
+    name: Build (Linux cross-compile)
+    runs-on: ubuntu-latest
+    needs: [validate]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          sudo apt-get remove -y clang-format clang-tidy || true
+          wget -qO- https://apt.llvm.org/llvm.sh | sudo bash -s -- $LLVM_VERSION all
+          sudo apt-get install -y ninja-build python3 msitools python3-simplejson python3-six
+          for tool in clang-cl lld-link llvm-lib llvm-rc llvm-mt; do
+            sudo update-alternatives --install /usr/bin/$tool $tool /usr/bin/$tool-$LLVM_VERSION 1000
+          done
+
+      - name: Clone msvc-wine
+        run: git clone https://github.com/mstorsjo/msvc-wine.git /tmp/msvc-wine
+
+      - name: Get MSVC version
+        id: msvc-version
+        run: |
+          MSVC_VER=$(/tmp/msvc-wine/vsdownload.py --print-version | grep -oE '[0-9]+\.[0-9]+\.[0-9]+(\.[0-9]+)?' | tail -1)
+          echo "version=$MSVC_VER" >> "$GITHUB_OUTPUT"
+
+      - name: Restore msvc-wine cache
+        id: msvc-wine-cache
+        uses: actions/cache@v5
+        with:
+          path: ~/.msvc
+          key: msvc-wine-${{ steps.msvc-version.outputs.version }}-${{ hashFiles('cmake/toolchains/*.cmake') }}
+          restore-keys: msvc-wine-
+
+      - name: Install msvc-wine
+        if: steps.msvc-wine-cache.outputs.cache-hit != 'true'
+        run: |
+          /tmp/msvc-wine/vsdownload.py --accept-license --dest ~/.msvc
+          /tmp/msvc-wine/install.sh ~/.msvc
+
+      - name: Restore CMake deps cache
+        uses: actions/cache@v5
+        with:
+          path: build/_deps
+          key: cmake-deps-Linux-${{ hashFiles('cmake/deps/*.cmake') }}
+          restore-keys: cmake-deps-Linux-
+
+      - name: Configure Release
+        run: cmake --preset linux-x64-release
+
+      - name: Build Release
+        run: cmake --build --preset linux-x64-release
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: linux-asi
+          path: build/AC.Rogue.PatchFix.asi
+          if-no-files-found: error
+
+  release:
+    name: Create Release
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux]
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Download Windows artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: windows-asi
+          path: artifacts/windows
+
+      - name: Download Linux artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: linux-asi
+          path: artifacts/linux
+
+      - name: Prepare release assets
+        run: |
+          cp artifacts/windows/AC.Rogue.PatchFix.asi AC.Rogue.PatchFix.asi
+          cp artifacts/linux/AC.Rogue.PatchFix.asi AC.Rogue.PatchFix-linux.asi
+          cp config/AC.Rogue.PatchFix.ini AC.Rogue.PatchFix.ini
+
+      - name: Create draft release
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: v${{ inputs.version }}
+          name: v${{ inputs.version }}
+          draft: true
+          prerelease: ${{ inputs.prerelease }}
+          generate_release_notes: true
+          files: |
+            AC.Rogue.PatchFix.asi
+            AC.Rogue.PatchFix-linux.asi
+            AC.Rogue.PatchFix.ini
