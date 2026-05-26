@@ -11,6 +11,7 @@
 // IWYU pragma: begin_exports
 #include "hooks/display_detection.hpp"
 #include "hooks/fov_correction.hpp"
+#include "hooks/fps_unlock.hpp"
 #include "hooks/game_state.hpp"
 #include "hooks/language_unlock.hpp"
 #include "hooks/viewport_fitting.hpp"
